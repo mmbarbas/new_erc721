@@ -10,8 +10,27 @@ interface IERC721_Barbas {
 
     event Transfer(address indexed from, address indexed to, uint256 indexed idToken);
 
-    function balanceOf(address owner) external view returns (uint256 balance);
+    error BalanceQueryForZeroAddress();
+    error OwnerIndexOutOfBounds();
+    error ApprovalToCurrentOwner();
+    error URIQueryForNonExistentToken();
+    error OwnerQueryForNonExistentToken();
+    error ApproveToCaller();
+    error ApprovedQueryForNonExistentToken();
+    error TransferCallerIsNotOwnerNorApproved();
+    error TransferToNonERC721ReceiverImplementer();
+    error ApproveCallerIsNotOwnerNorApprovedForAll();
+    error OperatorQueryForNonExistentToken();
+    error TransferOfTokenThatIsNotOwn();
+    error TransferToTheZeroAddress();
+    error MintToTheZeroAddress();
+    error MintZeroQuantity();
+    error TransferFromIncorrectOwner();
 
-    function tokenOwner(uint256 id) external view returns (address adrss);
+    struct TokenOwnership {
+        address addr;
+        uint64 startTimestamp;
+        bool burned;
+    }
 
 }
