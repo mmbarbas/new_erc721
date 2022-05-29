@@ -8,3 +8,4 @@ Optimizations:
     
     2- removing reduntant owner storage. Instead of storing for each token the owners address it's only saved the owner data for the first token as well as the number of minted tokens. Because the tokens minted sequentially, we can easily know from where to where the tokens belong to an certain account. 
    
+![gas_test](https://user-images.githubusercontent.com/105460548/170894763-d325b05f-b51d-4570-9be4-fa1e1bf53e35.png)
