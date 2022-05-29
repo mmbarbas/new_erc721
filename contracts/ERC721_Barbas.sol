@@ -4,112 +4,128 @@ pragma solidity ^0.8.0;
 import "hardhat/console.sol";
 import './IERC721_Barbas.sol';
 
+/**
+ * @dev Token receiver interface.
+ */
 interface ERC721Barbas__Receiver {
     function onERC721_Barbas_Received(address operator, address from, uint256 tokenId,bytes calldata data) external returns (bytes4);
 }
+/**
+    @dev Implementation of the token ERC721 with focus on the gas optimization for the
+         batch minting as well as the transfer of tokens.
 
+         In the test folder there is a script to specifically test gas comsuption.
+
+         Tokens are sequentially minted.
+
+ */
 contract ERC721_Barbas is IERC721_Barbas{
     
-   // Mask of an entry in packed address data.
+    /**
+        Variables to manipulate bits of _accountData.
+        _accountData has 4 diferent values stored inside each uint256
+             - [0..63]    `balance`
+             - [64..127]  `numberMinted`
+             - [128..191] `numberBurned`
+             - [192..255] `aux`
+     */
     uint256 private constant BITMASK_ADDRESS_DATA_ENTRY = (1 << 64) - 1;
-
-    // The bit position of `numberMinted` in packed address data.
     uint256 private constant BITPOS_NUMBER_MINTED = 64;
-
-    // The bit position of `numberBurned` in packed address data.
     uint256 private constant BITPOS_NUMBER_BURNED = 128;
-
-    // The bit position of `aux` in packed address data.
     uint256 private constant BITPOS_AUX = 192;
-
-    // Mask of all 256 bits in packed address data except the 64 bits for `aux`.
     uint256 private constant BITMASK_AUX_COMPLEMENT = (1 << 192) - 1;
 
-    // The bit position of `startTimestamp` in packed ownership.
-    uint256 private constant BITPOS_START_TIMESTAMP = 160;
+    mapping(address => uint256) private _accountData;
+    //token -> adresses (addresses in uint256)
+    mapping(uint256 => uint256) private _tokenOwnerships;
 
-    // The bit mask of the `burned` bit in packed ownership.
-    uint256 private constant BITMASK_BURNED = 1 << 224;
-    
-    // The bit position of the `nextInitialized` bit in packed ownership.
-    uint256 private constant BITPOS_NEXT_INITIALIZED = 225;
-
-    // The bit mask of the `nextInitialized` bit in packed ownership.
-    uint256 private constant BITMASK_NEXT_INITIALIZED = 1 << 225;
-
-
+    //Id of the next token to be minted
     uint256 private _curentTokenIndex;
 
     //Token name
     string private _name;
-
+    
     //Token symbol
     string private _symbol;
 
-    //Tokens burned
+    //Number of burned tokens
     uint256 internal _counterBurnedToks;
 
-    // Bits Layout:
-    // - [0..159]   `addr`
-    // - [160..223] `startTimestamp`
-    // - [224]      `burned`
-    // - [225]      `nextInitialized`
-    mapping(uint256 => uint256) private _packedOwnerships;
-
-    // Bits Layout:
-    // - [0..63]    `balance`
-    // - [64..127]  `numberMinted`
-    // - [128..191] `numberBurned`
-    // - [192..255] `aux`
-    mapping(address => uint256) private _packedAddressData;
-
+    
     //Mapping token ID to correct address
     mapping(uint256 => address) private _tokenApprovs;
 
     //Mapping owner to opperator approvals
     mapping(address => mapping(address => bool)) private _operatorApprovs;
 
+    /**
+    @dev Initializes the contract by setting a `name`,`symbol` and the id of the next token to be minted as 0.    
+    */
     constructor(string memory name, string memory tokenSymbol) {
         _name = name;
         _symbol = tokenSymbol;
         _curentTokenIndex = initIdToken();
     }
 
-
+    /**
+        @dev returns the id of the first token -> 0
+     */
     function initIdToken() public view virtual returns(uint256) {
         return 0;
     }
 
+    /**
+        @dev returns the id of the next token to be minted
+     */
     function nextTokenIdToMint() public view returns(uint256) {
         return _curentTokenIndex;
     }
 
+    /**
+        @dev returns the total minted tokens
+    */
     function totalTokenMinted() public view returns(uint256) {
         unchecked {
-            return _curentTokenIndex - initIdToken();
+            return nextTokenIdToMint() - initIdToken();
         }
     }
-
+    
+    /**
+        @dev returns the total available minted tokens, having in consideration the burned tokens
+    */
     function totalSupply() public view returns (uint256) {
         //No need for check because _counterBurnedToks is never > (_curentTokenIndex - initIdToken())
         unchecked {
-            return totalTokenMinted() - _counterBurnedToks;
+            return totalTokenMinted() - totalBurn();
         }
     }
 
-
+    /**
+        @dev Function to know whos the token owner
+        @param idToken intenger representing the token
+        @return address of the token owner
+    */
     function tokenOwner(uint256 idToken) public view virtual returns(address) {
-       return address(uint160(_packedOwnershipOf(idToken)));
+       return address(uint160(getTokenOwner(idToken)));
     }
 
+    /**
+        @dev Returns the name of the token type created
+     */
     function getName() public view virtual returns (string memory) {
         return _name;
     }
    
+    /**
+        @dev Returns the name of the symbol created
+     */
     function getSymbol() public view virtual returns (string memory) {
         return _symbol;
     }
 
+    /**
+        @dev Returns the uri associated to the token
+     */
     function getTokenURI(uint256 idToken) public view virtual returns(string memory) {
         if(!hasToken(idToken)) revert URIQueryForNonExistentToken();
 
@@ -117,42 +133,57 @@ contract ERC721_Barbas is IERC721_Barbas{
         return bytes(baseURI).length > 0  ? string(abi.encodePacked(baseURI, toString(idToken))): "";
     }
 
-
-
+    /**
+      @dev Base URI for computing {tokenURI}. If set, the resulting URI for each
+      token will be the concatenation of the `baseURI` and the `tokenId`. Empty
+      by default, can be overriden in child contracts.
+     */
     function _baseURI() internal view virtual returns (string memory) {
         return "";
     }
 
+    /**
+        @dev Checks if the token exists or not. Meaning to check if was minted or
+        if it doesn't exist/was burned
+     */
+    function hasToken(uint256 idToken) internal view virtual returns (bool) {
+            return (initIdToken() <= idToken && idToken < _curentTokenIndex && _tokenOwnerships[idToken] != 1);
+    }
 
     // --------------------------  Approval functions ---------------------------------
 
+     /**
+        @dev Makes an address eligible to tranfer the id token to other account
+        @param to address of the account to make eligible to tranfer
+        @param idToken authorized for the account 'to' to transfer
+     */
     function approve(address to, uint256 idToken) public virtual {
         address owner = tokenOwner(idToken);
-
+  
         if(to == owner) revert ApprovalToCurrentOwner();
-
-        //console.log("sender" ,msg.sender);
-       //console.log("owner" ,owner);
-        //console.log("function" ,isAllApproved(owner,msg.sender));
 
         if(msg.sender != owner) {
             if(!isAllApproved(owner,msg.sender)) {
                 revert ApproveCallerIsNotOwnerNorApprovedForAll();
             }
-        }
-        //if(msg.sender != owner && !isAllApproved(owner,msg.sender)) revert ApproveCallerIsNotOwnerNorApprovedForAll();
-    
+        }    
         _tokenApprovs[idToken] = to;
         emit Approval(tokenOwner(idToken),to,idToken); 
 
     }
-
+    /**
+        @dev Returns the account approved for tokenId token.
+     */
     function getApproved(uint256 idToken) public view virtual returns(address) {
         if(!hasToken(idToken)) revert ApprovedQueryForNonExistentToken();
 
         return _tokenApprovs[idToken];
     }
 
+    /**
+        @dev Approve or remove operator as an operator for the caller. 
+        Operators can call transferFrom or safeTransferFrom for any token owned by the caller.
+     */
     function setApprovalForAll(address operator, bool isApproved) public virtual{
         if(operator == msg.sender) revert ApproveToCaller();
 
@@ -160,6 +191,9 @@ contract ERC721_Barbas is IERC721_Barbas{
         emit ApprovalForAll(msg.sender, operator, isApproved);
     }
 
+      /**
+        @dev Returns if the operator is allowed to manage all of the assets of owner.
+     */
     function isAllApproved(address owner, address opperator) public view virtual returns (bool) {
         return _operatorApprovs[owner][opperator];
     }   
@@ -168,6 +202,9 @@ contract ERC721_Barbas is IERC721_Barbas{
 
     //--------------------------  Transfer functions -------------------------------------
 
+    /**
+        @dev transfers the token 'form' one account to the othe account 'to'
+     */
     function transferFrom(address from, address to, uint256 idToken) public virtual {
         if(!ownerOrApproved(msg.sender, idToken))revert TransferCallerIsNotOwnerNorApproved();
 
@@ -175,10 +212,16 @@ contract ERC721_Barbas is IERC721_Barbas{
 
     }
 
+    /**
+        @dev Safely transfers tokenId token from from to to.
+    */
     function safeTransfer(address from, address to, uint256 idToken) public virtual {
         safeTransfer(from,to,idToken,"");
     }
 
+    /**
+        @dev Safely transfers tokenId token from from to to.
+    */
     function safeTransfer(address from, address to, uint256 idToken, bytes memory data) public virtual {
         _transfer(from,to,idToken);
 
@@ -189,16 +232,24 @@ contract ERC721_Barbas is IERC721_Barbas{
     }
 
   
-    function ownerOrApproved(address caller, uint256 idToken) internal view virtual returns(bool) {
+    function ownerOrApproved(address caller, uint256 idToken) internal view virtual returns(bool) {        
         if(!hasToken(idToken)) revert OperatorQueryForNonExistentToken();
 
          address owner = tokenOwner(idToken);
         return (owner == caller || getApproved(idToken) == caller || isAllApproved(owner,caller));
     }
 
-      function _transfer(address from, address to, uint256 idToken) private {
+    
+    /**
+        @dev Makes the transfer.
+        Verifies if the the token owner is equal to the addres 'from'
+        Verifies if the address 'from' is authorized to make that transfer
+        Verifies if the adress destination, 'to', is no 0
+        Emits a transfer Event
+    */
+    function _transfer(address from, address to, uint256 idToken) private {
         
-        uint256 previousOnwerPackInfo = _packedOwnershipOf(idToken);
+        uint256 previousOnwerPackInfo = getTokenOwner(idToken);
         address approvedAddress = _tokenApprovs[idToken];
 
         if(tokenOwner(idToken)!= from) revert TransferOfTokenThatIsNotOwn();
@@ -212,20 +263,18 @@ contract ERC721_Barbas is IERC721_Barbas{
         }
 
         unchecked {
-            --_packedAddressData[from]; //Account balances -1
-            ++_packedAddressData[to]; //Account balances +1
+            --_accountData[from]; //Account balances -1
+            ++_accountData[to]; //Account balances +1
 
-            _packedOwnerships[idToken] = _addressToUint256(to) | (block.timestamp << BITPOS_START_TIMESTAMP) | BITMASK_NEXT_INITIALIZED;
+            _tokenOwnerships[idToken] = _addressToUint256(to);
 
-            if (previousOnwerPackInfo & BITMASK_NEXT_INITIALIZED == 0) {
-                uint256 nextTokenId = idToken + 1;
+            uint256 nextTokenId = idToken + 1;
                 // If the next slot's address is zero
-                if (_packedOwnerships[nextTokenId] == 0) {
+            if (_tokenOwnerships[nextTokenId] == 0) {
                     // If the next slot is within bounds.
-                    if (nextTokenId != _curentTokenIndex) {
+                if (nextTokenId != _curentTokenIndex) {
                         // Initialize the next slot to maintain correctness for `ownerOf(tokenId + 1)`.
-                        _packedOwnerships[nextTokenId] = previousOnwerPackInfo;
-                    }
+                    _tokenOwnerships[nextTokenId] = previousOnwerPackInfo;
                 }
             }
         }
@@ -241,10 +290,24 @@ contract ERC721_Barbas is IERC721_Barbas{
 
     //--------------------------  Mint functions -------------------------------------
 
+    /**
+        @dev safe mint of token(s) to a specific adress, 'to'
+        @param to address of minted tokens destination
+        @param quantity amount of tokens to be minted
+     */
     function _safeMint(address to, uint256 quantity) public virtual {
         _safeMint2(to,quantity,"");
     }
 
+     /**
+        @dev safe mint of token(s) to a specific adress, 'to'
+        @param to address of minted tokens destination
+        @param quantity amount of tokens to be minted
+
+        Requirements:
+            address 'to' must exist
+            quantity of tokens to be minted > 0
+     */
     function _safeMint2(address to, uint256 quantity ,bytes memory _data) public virtual {
         uint256 startTokId = _curentTokenIndex;
 
@@ -254,9 +317,11 @@ contract ERC721_Barbas is IERC721_Barbas{
         _beforeTokenTransfers(address(0), to, startTokId, quantity);
 
         unchecked {
-            _packedAddressData[to] += quantity * ((1 << BITPOS_NUMBER_MINTED) | 1);
-            _packedOwnerships[startTokId] =_addressToUint256(to) | (block.timestamp << BITPOS_START_TIMESTAMP) | (_boolToUint256(quantity == 1) << BITPOS_NEXT_INITIALIZED);
-        
+            _accountData[to] += quantity * ((1 << BITPOS_NUMBER_MINTED) | 1);
+            
+            _tokenOwnerships[startTokId] =_addressToUint256(to) ;
+
+
             uint256 updatedIndex = startTokId;
             uint256 endTokensOwned = updatedIndex + quantity;
             if (to.code.length != 0) {
@@ -274,10 +339,18 @@ contract ERC721_Barbas is IERC721_Barbas{
             }
             _curentTokenIndex = updatedIndex;
         }
-        
         _afterTokenTransfers(address(0), to, startTokId, quantity);
     }
 
+  /**
+        @dev mint of token(s) to a specific adress, 'to'
+        @param to address of minted tokens destination
+        @param quantity amount of tokens to be minted
+
+        Requirements:
+            address 'to' must exist
+            quantity of tokens to be minted > 0
+     */
     function _mint(address to, uint256 quantity) public virtual {
         uint256 startTokId = _curentTokenIndex;
 
@@ -287,9 +360,9 @@ contract ERC721_Barbas is IERC721_Barbas{
         _beforeTokenTransfers(address(0), to, startTokId, quantity);
 
         unchecked {
-            _packedAddressData[to] += quantity * ((1 << BITPOS_NUMBER_MINTED) | 1);
-            _packedOwnerships[startTokId] =_addressToUint256(to) | (block.timestamp << BITPOS_START_TIMESTAMP) | (_boolToUint256(quantity == 1) << BITPOS_NEXT_INITIALIZED);
-        
+            _accountData[to] += quantity * ((1 << BITPOS_NUMBER_MINTED) | 1);
+            _tokenOwnerships[startTokId] =_addressToUint256(to) ;
+
             uint256 updatedIndex = startTokId;
             uint256 endTokensOwned = updatedIndex + quantity;
 
@@ -307,55 +380,45 @@ contract ERC721_Barbas is IERC721_Barbas{
 
     //-------------------------- Burn Functions---------------------------------------
 
+    /**
+        @dev burn of the given token
+     */
     function burn(uint256 idToken) public virtual {
         burn(idToken, false);
     }
 
+     /**
+        @dev burn of the given token
+
+        Requirements:
+            The account that calls the methos must be an approved account to burn the token
+     */
     function burn(uint256 idToken, bool approvalCheck) internal virtual {
-        uint256 prevOwnershipPacked = _packedOwnershipOf(idToken);
-        address from = address(uint160(prevOwnershipPacked));
-        address approvedAddress = _tokenApprovs[idToken];
+        address from = address(uint160(getTokenOwner(idToken)));
 
         if(approvalCheck) {
             if(!ownerOrApproved(msg.sender, idToken)) revert TransferCallerIsNotOwnerNorApproved();
         }
 
         _beforeTokenTransfers(from, address(0), idToken, 1);
-        //approve(address(0), idToken);
-        if (_addressToUint256(approvedAddress) != 0) {
-            delete _tokenApprovs[idToken];
-        }
-
-
+        approve(address(0), idToken);
+  
+        //overflow not possible
         unchecked {
-            _packedAddressData[from] -= 1;
-            _packedAddressData[from] += (1 << BITPOS_NUMBER_BURNED);
+            _accountData[from] += (1 << BITPOS_NUMBER_BURNED) - 1;
 
-            _packedOwnerships[idToken] = _addressToUint256(from) | (block.timestamp << BITPOS_START_TIMESTAMP) | BITMASK_BURNED |  BITMASK_NEXT_INITIALIZED;
-            
-            if (prevOwnershipPacked & BITMASK_NEXT_INITIALIZED == 0) {
-                uint256 nextTokenId = idToken + 1;
-                // If the next slot's address is zero and not burned (i.e. packed value is zero).
-                if (_packedOwnerships[nextTokenId] == 0) {
-                    // If the next slot is within bounds.
-                    if (nextTokenId != _curentTokenIndex) {
-                        // Initialize the next slot to maintain correctness for `ownerOf(tokenId + 1)`.
-                        _packedOwnerships[nextTokenId] = prevOwnershipPacked;
-                    }
-                }
-            }
-        
+            // 1 = burned
+            _tokenOwnerships[idToken] =1;
+            _counterBurnedToks++;
         }
 
         emit Transfer(from, address(0),idToken);
         _afterTokenTransfers(from, address(0), idToken, 1);
-
-            // Overflow not possible
-        unchecked {
-            _counterBurnedToks++;
-        }
+      
     }
-
+    /**
+        @dev return the total tokens burned
+     */
     function totalBurn() public view returns(uint256) {
         return _counterBurnedToks;
     }
@@ -365,6 +428,15 @@ contract ERC721_Barbas is IERC721_Barbas{
 
     //-------------------------- Aux function ------------------------------------
     
+    /**
+     * @dev Function to invoke ERC721Barbas__Receiver a target contract.
+     *
+     * @param from address representing the previous owner of the given token ID
+     * @param to target address that will receive the tokens
+     * @param idToken id of the token to be transferred
+     * @param _data bytes optional data to send along with the call
+     * @return bool whether the call correctly returned the expected value
+     */
     function _checkContractOnERC721Received( address from, address to, uint256 idToken, bytes memory _data) private returns (bool) {
         try ERC721Barbas__Receiver(to).onERC721_Barbas_Received(msg.sender, from, idToken, _data) returns (
             bytes4 retval
@@ -381,160 +453,132 @@ contract ERC721_Barbas is IERC721_Barbas{
         }
     }
 
+     /**
+     * @dev Hook that is called before a set of serially-ordered token ids are about to be transferred. This includes minting.
+     * And also called before burning one token.
+     *
+     * startTokenId - the first token id to be transferred
+     * quantity - the amount to be transferred
+     */
     function _beforeTokenTransfers(address from,address to,uint256 startTokenId, uint256 quantity) internal virtual {}
+    
+     /**
+     * @dev Hook that is called after a set of serially-ordered token ids have been transferred. This includes
+     * minting.
+     * And also called after one token has been burned.
+     *
+     * startTokenId - the first token id to be transferred
+     * quantity - the amount to be transferred
+     */
     function _afterTokenTransfers(address from,address to,uint256 startTokenId, uint256 quantity) internal virtual {}
 
-    function hasToken(uint256 idToken) internal view virtual returns (bool) {
-            return (initIdToken() <= idToken && idToken < _curentTokenIndex && _packedOwnerships[idToken] & BITMASK_BURNED == 0);
-    }
-
+     /**
+     * @dev Casts the address to uint256.
+     */
     function _addressToUint256(address value) private pure returns (uint256 result) {
         assembly {
             result := value
         }
     }
 
-    function _boolToUint256(bool value) private pure returns (uint256 result) {
-        assembly {
-            result := value
-        }
-    }
-
-     //Converts uint256 to string
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` decimal representation.
+     */
     function toString(uint256 value) public pure returns (string memory ptr) {
         assembly {
-            // The maximum value of a uint256 contains 78 digits (1 byte per digit), 
-            // but we allocate 128 bytes to keep the free memory pointer 32-byte word aliged.
-            // We will need 1 32-byte word to store the length, 
-            // and 3 32-byte words to store a maximum of 78 digits. Total: 32 + 3 * 32 = 128.
             ptr := add(mload(0x40), 128)
-            // Update the free memory pointer to allocate.
             mstore(0x40, ptr)
-
-            // Cache the end of the memory to calculate the length later.
             let end := ptr
-
-            // We write the string from the rightmost digit to the leftmost digit.
-            // The following is essentially a do-while loop that also handles the zero case.
-            // Costs a bit more than early returning for the zero case,
-            // but cheaper in terms of deployment and overall runtime costs.
             for { 
-                // Initialize and perform the first pass without check.
                 let temp := value
-                // Move the pointer 1 byte leftwards to point to an empty character slot.
                 ptr := sub(ptr, 1)
-                // Write the character to the pointer. 48 is the ASCII index of '0'.
                 mstore8(ptr, add(48, mod(temp, 10)))
                 temp := div(temp, 10)
             } temp { 
-                // Keep dividing `temp` until zero.
                 temp := div(temp, 10)
-            } { // Body of the for loop.
+            } { 
                 ptr := sub(ptr, 1)
                 mstore8(ptr, add(48, mod(temp, 10)))
             }
-            
             let length := sub(end, ptr)
-            // Move the pointer 32 bytes leftwards to make room for the length.
             ptr := sub(ptr, 32)
-            // Store the length.
             mstore(ptr, length)
         }
     }
 
-    function toStrin2(uint256 value) internal pure returns (string memory) {
-        if (value == 0) {
-            return "0";
-        }
-        uint256 temp = value;
-        uint256 digits;
-        while (temp != 0) {
-            digits++;
-            temp /= 10;
-        }
-        bytes memory buffer = new bytes(digits);
-        while (value != 0) {
-            digits -= 1;
-            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
-            value /= 10;
-        }
-        return string(buffer);
-    }
     //-------------------------- End aux funtions --------------------------------
 
    
     // Functions from packed owner info
 
-    
+    /**
+        @dev balance of tokens for the account 'owner'
+     */    
     function balanceOf(address owner) public view virtual returns(uint256){
         if(owner == address(0)) revert BalanceQueryForZeroAddress();
         
-        return _packedAddressData[owner] & BITMASK_ADDRESS_DATA_ENTRY;
+        return _accountData[owner] & BITMASK_ADDRESS_DATA_ENTRY;
     }
 
+      /**
+        @dev returns the minted tokens by the owner
+     */    
     function _numberMintedByOwner(address owner) internal view returns (uint256) {
-        return (_packedAddressData[owner] >> BITPOS_NUMBER_MINTED) & BITMASK_ADDRESS_DATA_ENTRY;
+        return (_accountData[owner] >> BITPOS_NUMBER_MINTED) & BITMASK_ADDRESS_DATA_ENTRY;
     }
     
+    /**
+        @dev returns the burned tokens by the owner
+     */ 
     function _numberBurnedByOwner(address owner) internal view returns (uint256) {
-        return (_packedAddressData[owner] >> BITPOS_NUMBER_BURNED) & BITMASK_ADDRESS_DATA_ENTRY;
+        return (_accountData[owner] >> BITPOS_NUMBER_BURNED) & BITMASK_ADDRESS_DATA_ENTRY;
     }
 
+    /**
+      @dev Returns the auxillary data for `owner`. (e.g. number of whitelist mint slots used).
+     */
     function _getAuxByOwner(address owner) internal view returns (uint64) {
-        return uint64(_packedAddressData[owner] >> BITPOS_AUX); 
+        return uint64(_accountData[owner] >> BITPOS_AUX); 
     }
 
-   
+   /**
+    @dev Sets the auxillary data for `owner`. (e.g. number of whitelist mint slots used).
+    */
     function _setAuxByOwner(address owner, uint64 aux) internal {
-        uint256 packed = _packedAddressData[owner];
+        uint256 packed = _accountData[owner];
         uint256 auxCasted;
         assembly { // Cast aux without masking.
             auxCasted := aux
         }
         packed = (packed & BITMASK_AUX_COMPLEMENT) | (auxCasted << BITPOS_AUX);
-        _packedAddressData[owner] = packed;
+        _accountData[owner] = packed;
     }
 
     // End Functions from packed owner info
 
     // Functions from packed token info
 
-    function _packedOwnershipOf(uint256 tokenId) private view returns (uint256) {
-        uint256 toke = tokenId;
+    /**
+        @dev Returns in uint256 the owner of the token. 
+        The value return need after to be coverted to an address like this: address(unit160(unit256_value))
 
+     */
+    function getTokenOwner(uint256 tokenId) private view returns (uint256) {
+        uint256 toke = tokenId;
+     
         unchecked {
             if (initIdToken() <= toke)
                 if (toke < _curentTokenIndex) {
-                    uint256 packed = _packedOwnerships[toke];
-                    if (packed & BITMASK_BURNED == 0) {
+                    uint256 packed = _tokenOwnerships[toke];
+                    if (packed != 1) {
                         while (packed == 0) {
-                            packed = _packedOwnerships[--toke];
+                            packed = _tokenOwnerships[--toke];
                         }
                         return packed;
                     }
                 }
         }
         revert OwnerQueryForNonExistentToken();
-    }
-
-    function _unpackedOwnership(uint256 packed) private pure returns (TokenOwnership memory ownership) {
-        ownership.addr = address(uint160(packed));
-        ownership.startTimestamp = uint64(packed >> BITPOS_START_TIMESTAMP);
-        ownership.burned = packed & BITMASK_BURNED != 0;
-    }
-
-    function _ownershipAt(uint256 index) internal view returns (TokenOwnership memory) {
-        return _unpackedOwnership(_packedOwnerships[index]);
-    }
-
-    function _initializeOwnershipAt(uint256 index) internal {
-        if (_packedOwnerships[index] == 0) {
-            _packedOwnerships[index] = _packedOwnershipOf(index);
-        }
-    }
-
-    function _ownershipOf(uint256 tokenId) internal view returns (TokenOwnership memory) {
-        return _unpackedOwnership(_packedOwnershipOf(tokenId));
     }
 
     // End functions from packed token info

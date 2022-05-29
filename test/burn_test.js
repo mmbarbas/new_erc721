@@ -18,7 +18,7 @@ describe("Burn tests", function()  {
   it('increments burnCount to adjust totalSupply correctly', async () => {
     await myContract.connect(minter)._safeMint(minter.address,1);
     expect(await myContract.totalSupply()).to.be.equal(1);
-    await myContract.burn(0);
+    await myContract.connect(minter).burn(0);
     expect(await myContract.totalSupply()).to.be.equal(0);
   });
 
@@ -28,9 +28,9 @@ describe("Burn tests", function()  {
 
     expect(await myContract.getApproved(0)).to.be.equal(approved.address);
 
-    await myContract.burn(0);
+    await myContract.connect(minter).burn(0);
 
-    expect(await myContract.balanceOf(minter.address)).to.be.equal(0);
+   expect(await myContract.balanceOf(minter.address)).to.be.equal(0);
 
     await expect(myContract.getApproved(0)).to.be.revertedWith('ApprovedQueryForNonExistentToken');
 

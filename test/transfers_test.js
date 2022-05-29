@@ -31,10 +31,10 @@ describe("Transfer tests", function () {
 
           await myContract.connect(minter).approve(approved.address, 0);
           await myContract.connect(minter).setApprovalForAll(operator.address, true);
-
-          await myContract.connect(approved).transferFrom(minter.address, luckybob.address, 0);
-          await myContract.connect(operator).transferFrom(minter.address, luckybob.address, 1);
-          await myContract.connect(minter).transferFrom(minter.address, luckybob.address, 2);
+          
+         await myContract.connect(approved).transferFrom(minter.address, luckybob.address, 0);
+         await myContract.connect(operator).transferFrom(minter.address, luckybob.address, 1);
+         await myContract.connect(minter).transferFrom(minter.address, luckybob.address, 2);
 
           expect(await myContract.balanceOf(luckybob.address)).to.be.equal(3);
           expect(await myContract.tokenOwner(0)).to.be.equal(luckybob.address);
